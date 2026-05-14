@@ -247,7 +247,7 @@ namespace sio
     {
         if (_pending_buffers > 0) {
             assert(is_binary_message(buf_payload));//this is ensured by outside.
-            _buffers.push_back(std::make_shared<string>(buf_payload.data(),buf_payload.size()));
+            _buffers.push_back(std::make_shared<string>(buf_payload.data() + 1, buf_payload.size() - 1));
             _pending_buffers--;
             if (_pending_buffers == 0) {
 

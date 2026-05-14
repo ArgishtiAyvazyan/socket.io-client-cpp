@@ -492,8 +492,19 @@ namespace sio
     
     void client_impl::on_message(connection_hdl, client_type::message_ptr msg)
     {
-        // Parse the incoming message according to socket.IO rules
-        m_packet_mgr.put_payload(msg->get_payload());
+        // Binary WebSocket frames need special handling
+        if (msg->get_opcode() == frame::opcode::binary)
+        {
+            std::string binary_payload;
+            binary_payload.reserve(msg->get_payload().size() + 1);
+            binary_payload.push_back(static_cast<char>(packet::frame_message));
+            binary_payload.append(msg->get_payload());
+            m_packet_mgr.put_payload(binary_payload);
+        }
+        else
+        {
+            m_packet_mgr.put_payload(msg->get_payload());
+        }
     }
     
     void client_impl::on_handshake(message::ptr const& message)
