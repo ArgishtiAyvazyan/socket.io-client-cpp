@@ -81,6 +81,13 @@ namespace sio
     void client::set_ssl_ca_certificates_pem(const std::string &pem_chain) {
       m_impl->set_ssl_ca_certificates_pem(pem_chain);
     }
+
+#if SIO_TLS
+    void client::set_tls_verify_callback(tls_verify_callback const& cb) {
+        m_impl->set_tls_verify_callback(cb);
+    }
+#endif
+
     void client::connect(const std::string& uri)
     {
         m_impl->connect(uri, {}, {}, {});

@@ -124,6 +124,13 @@ namespace sio
         m_ssl_ca_certificates_pem = split_pem_certificates(pem_chain);
     }
 
+#if SIO_TLS
+    void client_impl::set_tls_verify_callback(client::tls_verify_callback const& cb)
+    {
+        m_tls_verify_callback = cb;
+    }
+#endif
+
     void client_impl::connect(const string& uri, const map<string,string>& query, const map<string, string>& headers, const message::ptr& auth)
     {
         if(m_reconn_timer)
@@ -724,6 +731,19 @@ failed:
                     cerr << "SSL certificate verification may not work correctly."
                          << endl;
                 }
+            }
+        }
+
+        if (m_tls_verify_callback)
+        {
+            ctx->set_verify_callback(
+                [this](bool preverified, asio::ssl::verify_context& asio_ctx) -> bool {
+                    sio::tls_verify_context sio_ctx(asio_ctx.native_handle());
+                    return m_tls_verify_callback(preverified, sio_ctx);
+                }, ec);
+            if (ec)
+            {
+                cerr << "Set verify callback failed,reason:" << ec.message() << endl;
             }
         }
 

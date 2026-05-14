@@ -137,6 +137,10 @@ namespace sio
 
         void set_ssl_ca_certificates_pem(const std::string &pem_chain);
 
+#if SIO_TLS
+        void set_tls_verify_callback(client::tls_verify_callback const& cb);
+#endif
+
     protected:
         void send(packet& p);
         
@@ -216,7 +220,9 @@ namespace sio
 
         bool m_ssl_verify_enabled;
         std::vector<std::string> m_ssl_ca_certificates_pem;
-
+#if SIO_TLS
+        client::tls_verify_callback m_tls_verify_callback;
+#endif
 
         unsigned int m_ping_interval;
         unsigned int m_ping_timeout;
