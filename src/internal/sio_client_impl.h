@@ -44,6 +44,7 @@ typedef websocketpp::config::asio_client client_config;
 #include <thread>
 #include "../sio_client.h"
 #include "sio_packet.h"
+#include <vector>
 
 namespace sio
 {
@@ -132,6 +133,10 @@ namespace sio
 		
         void set_proxy_basic_auth(const std::string& uri, const std::string& username, const std::string& password);
 
+        void set_ssl_verify_mode(bool verify);
+
+        void set_ssl_ca_certificates_pem(const std::string &pem_chain);
+
     protected:
         void send(packet& p);
         
@@ -208,6 +213,10 @@ namespace sio
         std::string m_proxy_base_url;
         std::string m_proxy_basic_username;
         std::string m_proxy_basic_password;
+
+        bool m_ssl_verify_enabled;
+        std::vector<std::string> m_ssl_ca_certificates_pem;
+
 
         unsigned int m_ping_interval;
         unsigned int m_ping_timeout;

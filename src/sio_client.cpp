@@ -74,6 +74,13 @@ namespace sio
         m_impl->set_proxy_basic_auth(uri, username, password);
     }
 
+    void client::set_ssl_verify_mode(bool verify) {
+      m_impl->set_ssl_verify_mode(verify);
+    }
+    
+    void client::set_ssl_ca_certificates_pem(const std::string &pem_chain) {
+      m_impl->set_ssl_ca_certificates_pem(pem_chain);
+    }
     void client::connect(const std::string& uri)
     {
         m_impl->connect(uri, {}, {}, {});

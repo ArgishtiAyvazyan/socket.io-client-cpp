@@ -7,6 +7,7 @@
 //
 
 #include "sio_client_impl.h"
+#include <asio/buffer.hpp>
 #include <functional>
 #include <sstream>
 #include <chrono>
@@ -30,6 +31,37 @@ using namespace std;
 
 namespace sio
 {
+
+    static std::vector<std::string>
+    split_pem_certificates(const std::string &pem_chain)
+    {
+        const std::string begin_marker = "-----BEGIN CERTIFICATE-----";
+        const std::string end_marker = "-----END CERTIFICATE-----";
+        std::vector<std::string> certs;
+        size_t search_pos = 0;
+
+        while (true)
+        {
+            size_t begin_pos = pem_chain.find(begin_marker, search_pos);
+            if (begin_pos == std::string::npos)
+            {
+                break;
+            }
+            size_t end_pos = pem_chain.find(end_marker, begin_pos);
+            if (end_pos == std::string::npos)
+            {
+                break;
+            }
+            end_pos += end_marker.size();
+            std::string cert = pem_chain.substr(begin_pos, end_pos - begin_pos);
+            cert.append("\n");
+            certs.push_back(std::move(cert));
+            search_pos = end_pos;
+        }
+
+        return certs;
+    }
+
     /*************************public:*************************/
     client_impl::client_impl(client_options const& options) :
         m_ping_interval(0),
@@ -39,7 +71,8 @@ namespace sio
         m_reconn_delay(5000),
         m_reconn_delay_max(25000),
         m_reconn_attempts(0xFFFFFFFF),
-        m_reconn_made(0)
+        m_reconn_made(0),
+        m_ssl_verify_enabled(false)
     {
         using websocketpp::log::alevel;
 #ifndef DEBUG
@@ -80,7 +113,17 @@ namespace sio
         m_proxy_basic_username = username;
         m_proxy_basic_password = password;
     }
-    
+
+    void client_impl::set_ssl_verify_mode(bool verify)
+    {
+        m_ssl_verify_enabled = verify;
+    }
+
+    void client_impl::set_ssl_ca_certificates_pem(const std::string &pem_chain)
+    {
+        m_ssl_ca_certificates_pem = split_pem_certificates(pem_chain);
+    }
+
     void client_impl::connect(const string& uri, const map<string,string>& query, const map<string, string>& headers, const message::ptr& auth)
     {
         if(m_reconn_timer)
@@ -644,11 +687,46 @@ failed:
                          asio::ssl::context::no_tlsv1 |
                          asio::ssl::context::no_tlsv1_1 |
                          asio::ssl::context::single_dh_use,ec);
-        if(ec)
+        if (ec)
         {
             cerr<<"Init tls failed,reason:"<< ec.message()<<endl;
         }
-        
+
+        if (m_ssl_verify_enabled)
+        {
+            // Enable peer certificate verification
+            ctx->set_verify_mode(asio::ssl::verify_peer, ec);
+            if (ec)
+            {
+                cerr << "Set verify mode failed,reason:" << ec.message() << endl;
+            }
+            else if (!m_ssl_ca_certificates_pem.empty())
+            {
+                for (const auto &cert_pem : m_ssl_ca_certificates_pem)
+                {
+                    ctx->add_certificate_authority(asio::buffer(cert_pem), ec);
+                    if (ec)
+                    {
+                        cerr << "Warning: Failed to add CA certificate,reason:"
+                             << ec.message() << endl;
+                        break;
+                    }
+                }
+            }
+            else
+            {
+                // Load root CA certificates from OS storage
+                ctx->set_default_verify_paths(ec);
+                if (ec)
+                {
+                    cerr << "Warning: Failed to load default verify paths,reason:"
+                         << ec.message() << endl;
+                    cerr << "SSL certificate verification may not work correctly."
+                         << endl;
+                }
+            }
+        }
+
         return ctx;
     }
 #endif
