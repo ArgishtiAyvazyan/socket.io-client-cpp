@@ -433,7 +433,7 @@ namespace sio
         {
             return;
         }
-        if(m_con_state == con_closed)
+        if(m_con_state == con_closed && !m_abort_retries)
         {
             m_con_state = con_opening;
             m_reconn_made++;
@@ -509,7 +509,8 @@ namespace sio
     {
         if (m_con_state == con_closing) {
             LOG("Connection opened while closing." << endl);
-            this->close();
+            lib::error_code ec;
+            m_client.close(con, close::status::normal, "Closing", ec);
             return;
         }
 
@@ -638,7 +639,9 @@ failed:
         packet p(packet::frame_pong);
         m_packet_mgr.encode(p, [&](bool /*isBin*/,shared_ptr<const string> payload)
         {
-            this->m_client.send(this->m_con, *payload, frame::opcode::text);
+            if (!m_con.expired()) {
+                this->m_client.send(this->m_con, *payload, frame::opcode::text);
+            }
         });
 
         // Reset the ping timeout.
