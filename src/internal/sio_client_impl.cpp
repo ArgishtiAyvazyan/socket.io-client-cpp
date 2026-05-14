@@ -15,10 +15,12 @@
 #include <cmath>
 // Comment this out to disable handshake logging to stdout
 #if (DEBUG || _DEBUG) && !defined(SIO_DISABLE_LOGGING)
-#define LOG(x) std::cout << x
+#define LOG(x) do { std::ostringstream _sio_ss; _sio_ss << x; this->log(sio::log_level_debug, _sio_ss.str()); } while(0)
 #else
 #define LOG(x)
 #endif
+
+#define SIO_LOG(level, x) do { std::ostringstream _sio_ss; _sio_ss << x; this->log(level, _sio_ss.str()); } while(0)
 
 #if SIO_TLS
 // If using Asio's SSL support, you will also need to add this #include.
@@ -245,6 +247,37 @@ namespace sio
         m_client.set_access_channels(websocketpp::log::alevel::all);
     }
 
+    void client_impl::set_log_handler(log_handler const& handler)
+    {
+        m_log_handler = handler;
+        if (m_log_handler)
+        {
+            m_alog_buf.reset(new log_streambuf(m_log_handler, log_level_info));
+            m_elog_buf.reset(new log_streambuf(m_log_handler, log_level_error));
+            m_alog_stream.reset(new std::ostream(m_alog_buf.get()));
+            m_elog_stream.reset(new std::ostream(m_elog_buf.get()));
+            m_client.get_alog().set_ostream(m_alog_stream.get());
+            m_client.get_elog().set_ostream(m_elog_stream.get());
+        }
+        else
+        {
+            m_client.get_alog().set_ostream(&std::cout);
+            m_client.get_elog().set_ostream(&std::cerr);
+            m_alog_stream.reset();
+            m_elog_stream.reset();
+            m_alog_buf.reset();
+            m_elog_buf.reset();
+        }
+    }
+
+    void client_impl::log(log_level level, const string& msg)
+    {
+        if (m_log_handler)
+        {
+            m_log_handler(level, msg);
+        }
+    }
+
     /*************************protected:*************************/
     void client_impl::send(packet& p)
     {
@@ -362,7 +395,7 @@ namespace sio
         }
         if (m_con.expired())
         {
-            cerr << "Error: No active session" << endl;
+            SIO_LOG(sio::log_level_error, "Error: No active session");
         }
         else
         {
@@ -379,7 +412,7 @@ namespace sio
             m_client.send(m_con,*payload_ptr,opcode,ec);
             if(ec)
             {
-                cerr<<"Send failed,reason:"<< ec.message()<<endl;
+                SIO_LOG(sio::log_level_error, "Send failed,reason:" << ec.message());
             }
         }
     }
@@ -696,7 +729,7 @@ failed:
                          asio::ssl::context::single_dh_use,ec);
         if (ec)
         {
-            cerr<<"Init tls failed,reason:"<< ec.message()<<endl;
+            SIO_LOG(sio::log_level_error, "Init tls failed,reason:" << ec.message());
         }
 
         if (m_ssl_verify_enabled)
@@ -705,7 +738,7 @@ failed:
             ctx->set_verify_mode(asio::ssl::verify_peer, ec);
             if (ec)
             {
-                cerr << "Set verify mode failed,reason:" << ec.message() << endl;
+                SIO_LOG(sio::log_level_error, "Set verify mode failed,reason:" << ec.message());
             }
             else if (!m_ssl_ca_certificates_pem.empty())
             {
@@ -714,8 +747,7 @@ failed:
                     ctx->add_certificate_authority(asio::buffer(cert_pem), ec);
                     if (ec)
                     {
-                        cerr << "Warning: Failed to add CA certificate,reason:"
-                             << ec.message() << endl;
+                        SIO_LOG(sio::log_level_warning, "Failed to add CA certificate,reason:" << ec.message());
                         break;
                     }
                 }
@@ -726,10 +758,8 @@ failed:
                 ctx->set_default_verify_paths(ec);
                 if (ec)
                 {
-                    cerr << "Warning: Failed to load default verify paths,reason:"
-                         << ec.message() << endl;
-                    cerr << "SSL certificate verification may not work correctly."
-                         << endl;
+                    SIO_LOG(sio::log_level_warning, "Failed to load default verify paths,reason:" << ec.message());
+                    SIO_LOG(sio::log_level_warning, "SSL certificate verification may not work correctly.");
                 }
             }
         }
@@ -743,7 +773,7 @@ failed:
                 }, ec);
             if (ec)
             {
-                cerr << "Set verify callback failed,reason:" << ec.message() << endl;
+                SIO_LOG(sio::log_level_error, "Set verify callback failed,reason:" << ec.message());
             }
         }
 

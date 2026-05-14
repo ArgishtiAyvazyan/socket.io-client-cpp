@@ -9,7 +9,7 @@
 #include <functional>
 
 #if (DEBUG || _DEBUG) && !defined(SIO_DISABLE_LOGGING)
-#define LOG(x) std::cout << x
+#define LOG(x) do { if(m_client) { std::ostringstream _sio_ss; _sio_ss << x; m_client->log(sio::log_level_debug, _sio_ss.str()); } } while(0)
 #else
 #define LOG(x)
 #endif

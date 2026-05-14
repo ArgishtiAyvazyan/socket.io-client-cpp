@@ -45,9 +45,46 @@ typedef websocketpp::config::asio_client client_config;
 #include "../sio_client.h"
 #include "sio_packet.h"
 #include <vector>
+#include <sstream>
 
 namespace sio
 {
+    // Custom streambuf that routes complete lines to a log_handler callback.
+    class log_streambuf : public std::streambuf {
+    public:
+        log_streambuf(log_handler& handler, log_level level)
+            : m_handler(handler), m_level(level) {}
+    protected:
+        int overflow(int c) override {
+            if (c == EOF) return c;
+            if (c == '\n') {
+                flush_line();
+            } else {
+                m_line += static_cast<char>(c);
+            }
+            return c;
+        }
+        std::streamsize xsputn(const char* s, std::streamsize n) override {
+            for (std::streamsize i = 0; i < n; ++i) {
+                overflow(s[i]);
+            }
+            return n;
+        }
+        int sync() override {
+            if (!m_line.empty()) flush_line();
+            return 0;
+        }
+    private:
+        void flush_line() {
+            if (m_handler && !m_line.empty()) {
+                m_handler(m_level, m_line);
+            }
+            m_line.clear();
+        }
+        log_handler& m_handler;
+        log_level m_level;
+        std::string m_line;
+    };
     using namespace websocketpp;
     
     typedef websocketpp::client<client_config> client_type;
@@ -130,6 +167,10 @@ namespace sio
         void set_logs_quiet();
 
         void set_logs_verbose();
+
+        void set_log_handler(log_handler const& handler);
+
+        void log(log_level level, const std::string& msg);
 		
         void set_proxy_basic_auth(const std::string& uri, const std::string& username, const std::string& password);
 
@@ -246,6 +287,12 @@ namespace sio
         client::socket_listener m_socket_open_listener;
         client::socket_listener m_socket_close_listener;
         
+        log_handler m_log_handler;
+        std::unique_ptr<log_streambuf> m_alog_buf;
+        std::unique_ptr<log_streambuf> m_elog_buf;
+        std::unique_ptr<std::ostream> m_alog_stream;
+        std::unique_ptr<std::ostream> m_elog_stream;
+
         std::map<const std::string,socket::ptr> m_sockets;
         
         std::mutex m_socket_mutex;

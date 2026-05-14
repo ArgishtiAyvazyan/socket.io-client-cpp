@@ -176,4 +176,9 @@ namespace sio
         m_impl->set_logs_verbose();
     }
 
+    void client::set_log_handler(log_handler const& handler)
+    {
+        m_impl->set_log_handler(handler);
+    }
+
 }
