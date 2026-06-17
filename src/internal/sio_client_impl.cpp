@@ -13,6 +13,8 @@
 #include <chrono>
 #include <mutex>
 #include <cmath>
+#include <exception>
+#include <string>
 // Comment this out to disable handshake logging to stdout
 #if (DEBUG || _DEBUG) && !defined(SIO_DISABLE_LOGGING)
 #define LOG(x) do { std::ostringstream _sio_ss; _sio_ss << x; this->log(sio::log_level_debug, _sio_ss.str()); } while(0)
@@ -312,8 +314,53 @@ namespace sio
     /*************************private:*************************/
     void client_impl::run_loop()
     {
+        // Exception firewall: the network thread must never let an asio/OpenSSL/WebSocket++
+        // exception escape, otherwise it propagates out of the std::thread and calls
+        // std::terminate (fast-fail).
+        bool threw = false;
+        try
+        {
+            m_client.run();
+        }
+        catch (const std::exception& e)
+        {
+            threw = true;
+            m_client.get_elog().write(websocketpp::log::elevel::rerror,
+                                      std::string("run_loop exception: ") + e.what());
+        }
+        catch (...)
+        {
+            threw = true;
+            m_client.get_elog().write(websocketpp::log::elevel::rerror,
+                                      "run_loop unknown exception");
+        }
 
-        m_client.run();
+        if (threw)
+        {
+            // run() died via an unhandled exception. Without this, a mid-connection failure leaves
+            // a zombie client: opened() still true (so the app keeps sending into a dead
+            // connection), no close/fail callback fires, and connect() would early-return on the
+            // still-set network thread. Transition to closed and, only when we were actually
+            // connecting/connected, notify so the app surfaces the error and tears down/recovers.
+            // Guarded: the notify callbacks must not let an exception escape the thread either.
+            try
+            {
+                const bool wasActive = (m_con_state == con_opening || m_con_state == con_opened);
+                m_con.reset();
+                m_con_state = con_closed;
+                this->sockets_invoke_void(&sio::socket::on_disconnect);
+                if (wasActive && m_fail_listener)
+                {
+                    m_fail_listener();
+                }
+            }
+            catch (...)
+            {
+                m_client.get_elog().write(websocketpp::log::elevel::rerror,
+                                          "run_loop recovery exception");
+            }
+        }
+
         m_client.reset();
         m_client.get_alog().write(websocketpp::log::alevel::devel,
                                   "run loop end");
