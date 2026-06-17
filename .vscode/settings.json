@@ -1,0 +1,8 @@
+{
+    "[cpp]": {
+        "editor.formatOnSave": false
+    },
+    "[cc]": {
+        "editor.formatOnSave": false
+    }
+}
