@@ -8,6 +8,7 @@
 #define SIO_CLIENT_H
 #include "sio_message.h"
 #include "sio_socket.h"
+#include <cstddef>
 #include <functional>
 #include <string>
 
@@ -28,15 +29,61 @@ enum log_level {
 typedef std::function<void(log_level, const std::string &)> log_handler;
 
 #if SIO_TLS
+// Peer certificate material for one verification callback invocation.
+//
+// No OpenSSL handle is exposed. sioclient_tls links its own OpenSSL and, when
+// built as a shared library, does not export it; a consumer linking a different
+// OpenSSL that dereferenced an X509 or X509_STORE_CTX from here would read
+// private, layout-unstable structs through the wrong offsets. Certificates
+// therefore cross the boundary as DER bytes, which the consumer parses with
+// whichever OpenSSL it links itself.
+//
+// The DER buffers are owned by sioclient_tls and valid only for the duration of
+// the callback. Copy anything that must outlive it.
 class tls_verify_context {
 public:
-  // Returns the native X509_STORE_CTX* handle for low-level OpenSSL inspection.
-  void *native_handle() { return m_native; }
+  struct der_cert {
+    const unsigned char *data;
+    std::size_t size;
+  };
+
+  // Certificate at the current verification depth.
+  der_cert current_cert() const { return m_current; }
+
+  // End-entity certificate of the peer chain.
+  der_cert leaf_cert() const { return m_leaf; }
+
+  // Certificates the peer sent during the handshake, leaf first.
+  std::size_t chain_size() const { return m_chain_size; }
+
+  der_cert chain_cert(std::size_t index) const {
+    return index < m_chain_size ? m_chain[index] : der_cert{nullptr, 0};
+  }
+
+  // Depth of current_cert(); 0 is the leaf.
+  int depth() const { return m_depth; }
+
+  // Current OpenSSL verification error (an X509_V_* code).
+  int error() const { return m_error; }
+
+  // Records an X509_V_* code to store on the underlying verification context.
+  // sioclient_tls applies it with its own OpenSSL once the callback returns.
+  void set_error(int error) {
+    m_error = error;
+    m_error_overridden = true;
+  }
 
 private:
   friend class client_impl;
-  explicit tls_verify_context(void *native) : m_native(native) {}
-  void *m_native;
+  tls_verify_context() = default;
+
+  der_cert m_current{nullptr, 0};
+  der_cert m_leaf{nullptr, 0};
+  const der_cert *m_chain = nullptr;
+  std::size_t m_chain_size = 0;
+  int m_depth = 0;
+  int m_error = 0;
+  bool m_error_overridden = false;
 };
 #endif
 

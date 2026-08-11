@@ -28,6 +28,9 @@
 // If using Asio's SSL support, you will also need to add this #include.
 // Source: http://think-async.com/Asio/asio-1.10.6/doc/asio/using.html
 // #include <asio/ssl/impl/src.hpp>
+#include <openssl/crypto.h>
+#include <openssl/x509.h>
+#include <openssl/x509_vfy.h>
 #endif
 
 using std::chrono::milliseconds;
@@ -769,6 +772,93 @@ failed:
     }
     
 #if SIO_TLS
+    static bool encode_cert_der(X509 *cert, std::vector<unsigned char> &out)
+    {
+        out.clear();
+        if (cert == NULL)
+        {
+            return false;
+        }
+        unsigned char *buf = NULL;
+        const int len = i2d_X509(cert, &buf);
+        if (len <= 0 || buf == NULL)
+        {
+            if (buf != NULL)
+            {
+                OPENSSL_free(buf);
+            }
+            return false;
+        }
+        out.assign(buf, buf + len);
+        OPENSSL_free(buf);
+        return true;
+    }
+
+    static tls_verify_context::der_cert make_der_view(const std::vector<unsigned char> &der)
+    {
+        tls_verify_context::der_cert view;
+        view.data = der.empty() ? NULL : der.data();
+        view.size = der.size();
+        return view;
+    }
+
+    bool client_impl::run_tls_verify_callback(bool preverified, void *native_store_ctx)
+    {
+        X509_STORE_CTX *store_ctx = static_cast<X509_STORE_CTX *>(native_store_ctx);
+        if (store_ctx == NULL)
+        {
+            SIO_LOG(sio::log_level_error, "TLS verify callback invoked without a store context");
+            return false;
+        }
+
+        // Encode while the certificates are still owned by this module's OpenSSL.
+        // Only the DER bytes are handed to the callback.
+        std::vector<std::vector<unsigned char> > chain_storage;
+        STACK_OF(X509) *peer_chain = X509_STORE_CTX_get0_untrusted(store_ctx);
+        if (peer_chain != NULL)
+        {
+            const int count = sk_X509_num(peer_chain);
+            for (int i = 0; i < count; ++i)
+            {
+                std::vector<unsigned char> der;
+                if (encode_cert_der(sk_X509_value(peer_chain, i), der))
+                {
+                    chain_storage.push_back(std::move(der));
+                }
+            }
+        }
+
+        std::vector<tls_verify_context::der_cert> chain_views;
+        chain_views.reserve(chain_storage.size());
+        for (size_t i = 0; i < chain_storage.size(); ++i)
+        {
+            chain_views.push_back(make_der_view(chain_storage[i]));
+        }
+
+        std::vector<unsigned char> current_der;
+        encode_cert_der(X509_STORE_CTX_get_current_cert(store_ctx), current_der);
+
+        std::vector<unsigned char> leaf_der;
+        encode_cert_der(X509_STORE_CTX_get0_cert(store_ctx), leaf_der);
+
+        tls_verify_context sio_ctx;
+        sio_ctx.m_current = make_der_view(current_der);
+        sio_ctx.m_leaf = make_der_view(leaf_der);
+        sio_ctx.m_chain = chain_views.empty() ? NULL : chain_views.data();
+        sio_ctx.m_chain_size = chain_views.size();
+        sio_ctx.m_depth = X509_STORE_CTX_get_error_depth(store_ctx);
+        sio_ctx.m_error = X509_STORE_CTX_get_error(store_ctx);
+
+        const bool accepted = m_tls_verify_callback(preverified, sio_ctx);
+
+        if (sio_ctx.m_error_overridden)
+        {
+            X509_STORE_CTX_set_error(store_ctx, sio_ctx.m_error);
+        }
+
+        return accepted;
+    }
+
     client_impl::context_ptr client_impl::on_tls_init(connection_hdl conn)
     {
         context_ptr ctx = context_ptr(new  asio::ssl::context(asio::ssl::context::tls));
@@ -818,8 +908,7 @@ failed:
         {
             ctx->set_verify_callback(
                 [this](bool preverified, asio::ssl::verify_context& asio_ctx) -> bool {
-                    sio::tls_verify_context sio_ctx(asio_ctx.native_handle());
-                    return m_tls_verify_callback(preverified, sio_ctx);
+                    return run_tls_verify_callback(preverified, asio_ctx.native_handle());
                 }, ec);
             if (ec)
             {

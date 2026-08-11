@@ -239,8 +239,13 @@ namespace sio
         
         #if SIO_TLS
         typedef websocketpp::lib::shared_ptr<asio::ssl::context> context_ptr;
-        
+
         context_ptr on_tls_init(connection_hdl con);
+
+        // Encodes the peer certificates with this library's OpenSSL and hands the
+        // resulting DER to m_tls_verify_callback, so no OpenSSL object leaves the
+        // module. Takes X509_STORE_CTX* as void* to keep OpenSSL out of this header.
+        bool run_tls_verify_callback(bool preverified, void* native_store_ctx);
         #endif
         
         // Percent encode query string
