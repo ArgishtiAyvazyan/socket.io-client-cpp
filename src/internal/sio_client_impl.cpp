@@ -13,7 +13,9 @@
 #include <chrono>
 #include <mutex>
 #include <cmath>
+#include <cstdint>
 #include <exception>
+#include <stdexcept>
 #include <string>
 // Comment this out to disable handshake logging to stdout
 #if (DEBUG || _DEBUG) && !defined(SIO_DISABLE_LOGGING)
@@ -69,6 +71,22 @@ namespace sio
         return certs;
     }
 
+    static thread_local client_impl* s_running_client = NULL;
+
+    namespace
+    {
+        struct running_client_scope
+        {
+            explicit running_client_scope(client_impl* client) { s_running_client = client; }
+            ~running_client_scope() { s_running_client = NULL; }
+        };
+    }
+
+    client_impl* client_impl::running_client_on_this_thread()
+    {
+        return s_running_client;
+    }
+
     /*************************public:*************************/
     client_impl::client_impl(client_options const& options) :
         m_ping_interval(0),
@@ -110,8 +128,21 @@ namespace sio
     
     client_impl::~client_impl()
     {
+        // Join the network thread before touching sockets. on_close nulls
+        // socket::impl::m_client; doing that before sync_close races socket::close
+        // on the closer thread (null this, AV at a small offset).
+        try
+        {
+            sync_close();
+        }
+        catch (const std::exception& e)
+        {
+            // Destroying a client from its own network thread is a caller bug, but
+            // letting the rejection escape a destructor would terminate the process.
+            m_client.get_elog().write(websocketpp::log::elevel::rerror,
+                                      std::string("~client_impl: ") + e.what());
+        }
         this->sockets_invoke_void(&sio::socket::on_close);
-        sync_close();
     }
 	
     void client_impl::set_proxy_basic_auth(const std::string& uri, const std::string& username, const std::string& password)
@@ -140,26 +171,19 @@ namespace sio
 
     void client_impl::connect(const string& uri, const map<string,string>& query, const map<string, string>& headers, const message::ptr& auth)
     {
-        if(m_reconn_timer)
-        {
-            m_reconn_timer->cancel();
-            m_reconn_timer.reset();
-        }
+        lock_guard<mutex> lock(m_lifecycle_mutex);
+
         if(m_network_thread)
         {
-            if(m_con_state == con_closing||m_con_state == con_closed)
-            {
-                //if client is closing, join to wait.
-                //if client is closed, still need to join,
-                //but in closed case,join will return immediately.
-                m_network_thread->join();
-                m_network_thread.reset();//defensive
-            }
-            else
+            const con_state state = m_con_state;
+            if(state != con_closing && state != con_closed)
             {
                 //if we are connected, do nothing.
                 return;
             }
+            //the previous run loop is closing or already finished: stop it, join it,
+            //and reset the endpoint before reusing it.
+            stop_and_join_locked();
         }
         m_con_state = con_opening;
         m_base_url = uri;
@@ -178,6 +202,9 @@ namespace sio
         m_http_headers = headers;
         m_auth = auth;
 
+        // No network thread is running at this point, so restarting the endpoint
+        // here is the only place it can be done safely.
+        m_client.reset();
         this->reset_states();
         m_abort_retries = false;
         m_client.get_io_service().dispatch(std::bind(&client_impl::connect_impl,this,uri,m_query_string));
@@ -225,15 +252,47 @@ namespace sio
 
     void client_impl::sync_close()
     {
-        m_con_state = con_closing;
-        m_abort_retries = true;
-        this->sockets_invoke_void(&sio::socket::close);
-        m_client.get_io_service().dispatch(std::bind(&client_impl::close_impl, this,close::status::normal,"End by user"));
-        if(m_network_thread)
+        if(running_client_on_this_thread() == this)
         {
-            m_network_thread->join();
-            m_network_thread.reset();
+            throw std::logic_error("sio: sync_close() called on this client's own network thread");
         }
+
+        lock_guard<mutex> lock(m_lifecycle_mutex);
+        stop_and_join_locked();
+    }
+
+    void client_impl::stop_and_join_locked()
+    {
+        m_abort_retries = true;
+        if(!m_network_thread)
+        {
+            m_con_state = con_closed;
+            return;
+        }
+
+        m_con_state = con_closing;
+        const std::uint64_t generation = m_lifecycle_generation.load();
+        // Close the websocket from the io thread. Do not call socket::close()
+        // here: it reads socket::impl::m_client without synchronization with
+        // on_close on the network thread.
+        m_client.get_io_service().dispatch(std::bind(&client_impl::close_generation, this, generation, close::status::normal, string("End by user")));
+        m_network_thread->join();
+        m_network_thread.reset();
+        // Only safe now that no io thread is running.
+        m_reconn_timer.reset();
+        m_ping_timeout_timer.reset();
+        m_client.reset();
+        m_lifecycle_generation.store(generation + 1);
+        m_con_state = con_closed;
+    }
+
+    void client_impl::close_generation(std::uint64_t generation, close::status::value code, string reason)
+    {
+        if(generation != m_lifecycle_generation.load())
+        {
+            return;
+        }
+        this->close_impl(code, reason);
     }
 
     void client_impl::set_logs_default()
@@ -320,6 +379,7 @@ namespace sio
         // Exception firewall: the network thread must never let an asio/OpenSSL/WebSocket++
         // exception escape, otherwise it propagates out of the std::thread and calls
         // std::terminate (fast-fail).
+        running_client_scope scope(this);
         bool threw = false;
         try
         {
@@ -364,7 +424,8 @@ namespace sio
             }
         }
 
-        m_client.reset();
+        // The endpoint is reset by the thread that joins this one, never from here:
+        // restarting the io service while another thread still holds it is a race.
         m_client.get_alog().write(websocketpp::log::alevel::devel,
                                   "run loop end");
     }
@@ -766,7 +827,8 @@ failed:
     
     void client_impl::reset_states()
     {
-        m_client.reset();
+        // Deliberately does not reset the endpoint: this also runs on the io thread
+        // during a reconnect, where the io service is still being run.
         m_sid.clear();
         m_packet_mgr.reset();
     }

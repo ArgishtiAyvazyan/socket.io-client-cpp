@@ -3,6 +3,7 @@
 #include "internal/sio_client_impl.h"
 #include <asio/steady_timer.hpp>
 #include <asio/error_code.hpp>
+#include <atomic>
 #include <queue>
 #include <chrono>
 #include <cstdarg>
@@ -171,7 +172,8 @@ namespace sio
         
         static event_listener s_null_event_listener;
         
-        static unsigned int s_global_event_id;
+        // Shared by every socket of every client in the process.
+        static std::atomic<unsigned int> s_global_event_id;
         
         sio::client_impl *m_client;
         
@@ -263,7 +265,7 @@ namespace sio
         
     }
     
-    unsigned int socket::impl::s_global_event_id = 1;
+    std::atomic<unsigned int> socket::impl::s_global_event_id(1);
     
     void socket::impl::emit(std::string const& name, message::list const& msglist, std::function<void (message::list const&)> const& ack)
     {
@@ -272,7 +274,7 @@ namespace sio
         int pack_id;
         if(ack)
         {
-            pack_id = s_global_event_id++;
+            pack_id = static_cast<int>(s_global_event_id.fetch_add(1, std::memory_order_relaxed));
             std::lock_guard<std::mutex> guard(m_event_mutex);
             m_acks[pack_id] = ack;
         }
@@ -286,10 +288,11 @@ namespace sio
     
     void socket::impl::send_connect()
     {
-        NULL_GUARD(m_client);
+        client_impl *client = m_client;
+        NULL_GUARD(client);
         packet p(packet::type_connect, m_nsp, m_auth);
-        m_client->send(p);
-        m_connection_timer.reset(new asio::steady_timer(m_client->get_io_service()));
+        client->send(p);
+        m_connection_timer.reset(new asio::steady_timer(client->get_io_service()));
         asio::error_code ec;
         m_connection_timer->expires_from_now(std::chrono::milliseconds(20000), ec);
         m_connection_timer->async_wait(std::bind(&socket::impl::timeout_connection,this, std::placeholders::_1));
@@ -297,7 +300,8 @@ namespace sio
     
     void socket::impl::close()
     {
-        NULL_GUARD(m_client);
+        client_impl *client = m_client;
+        NULL_GUARD(client);
         if(m_connected)
         {
             packet p(packet::type_disconnect,m_nsp);
@@ -305,7 +309,7 @@ namespace sio
             
             if(!m_connection_timer)
             {
-                m_connection_timer.reset(new asio::steady_timer(m_client->get_io_service()));
+                m_connection_timer.reset(new asio::steady_timer(client->get_io_service()));
             }
             asio::error_code ec;
             m_connection_timer->expires_from_now(std::chrono::milliseconds(3000), ec);
@@ -370,6 +374,13 @@ namespace sio
     void socket::impl::on_disconnect()
     {
         NULL_GUARD(m_client);
+        // A pending connect timeout is asio work: leaving it armed keeps the io
+        // service alive for its full duration and stalls the joining closer.
+        if(m_connection_timer)
+        {
+            m_connection_timer->cancel();
+            m_connection_timer.reset();
+        }
         if(m_connected)
         {
             m_connected = false;

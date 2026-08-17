@@ -41,6 +41,7 @@ typedef websocketpp::config::asio_client client_config;
 #include <atomic>
 #include <memory>
 #include <map>
+#include <mutex>
 #include <thread>
 #include "../sio_client.h"
 #include "sio_packet.h"
@@ -199,6 +200,18 @@ namespace sio
         void connect_impl(const std::string& uri, const std::string& query);
 
         void close_impl(close::status::value const& code,std::string const& reason);
+
+        // Stops the network thread, joins it, and only then resets the endpoint.
+        // Callers must hold m_lifecycle_mutex.
+        void stop_and_join_locked();
+
+        // close_impl trampoline for handlers dispatched from another thread. A
+        // dispatch made while the io service is stopped stays queued and would
+        // otherwise run against the next connection.
+        void close_generation(std::uint64_t generation, close::status::value code, std::string reason);
+
+        // The client whose run_loop() occupies the calling thread, if any.
+        static client_impl* running_client_on_this_thread();
         
         void send_impl(std::shared_ptr<const std::string> const&  payload_ptr,frame::opcode::value opcode);
         
@@ -273,6 +286,12 @@ namespace sio
         unsigned int m_ping_interval;
         unsigned int m_ping_timeout;
         
+        // Serializes connect/close ownership: network thread creation, join, and
+        // endpoint reset. Never held while invoking user listeners.
+        std::mutex m_lifecycle_mutex;
+
+        std::atomic<std::uint64_t> m_lifecycle_generation { 0 };
+
         std::unique_ptr<std::thread> m_network_thread;
         
         packet_manager m_packet_mgr;
@@ -281,7 +300,7 @@ namespace sio
 
         std::unique_ptr<asio::steady_timer> m_reconn_timer;
         
-        con_state m_con_state;
+        std::atomic<con_state> m_con_state;
         
         client::con_listener m_open_listener;
         client::con_listener m_fail_listener;
